@@ -1,13 +1,38 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { FLIGHT_INFOS } from '../constants';
-import { Plane, Phone, Car, MapPin, Calculator, ArrowRightLeft, Train } from 'lucide-react';
+import { Plane, Phone, Car, MapPin, Calculator, ArrowRightLeft, Train, Download, Upload, Database, AlertCircle } from 'lucide-react';
 
 interface InfoTabProps {
   exchangeRate: number;
+  onImport: (json: string) => void;
+  allData: any;
 }
 
-export const InfoTab: React.FC<InfoTabProps> = ({ exchangeRate }) => {
+export const InfoTab: React.FC<InfoTabProps> = ({ exchangeRate, onImport, allData }) => {
   const [jpyAmount, setJpyAmount] = useState<string>('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExport = () => {
+    const dataStr = JSON.stringify(allData, null, 2);
+    const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+    const exportFileDefaultName = `tokyo_trip_backup_${new Date().toISOString().split('T')[0]}.json`;
+    
+    const linkElement = document.createElement('a');
+    linkElement.setAttribute('href', dataUri);
+    linkElement.setAttribute('download', exportFileDefaultName);
+    linkElement.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      onImport(content);
+    };
+    reader.readAsText(file);
+  };
 
   return (
     <div className="px-6 pb-24 space-y-6 animate-fade-in">
@@ -20,7 +45,7 @@ export const InfoTab: React.FC<InfoTabProps> = ({ exchangeRate }) => {
         </div>
         <div className="flex items-center justify-between space-x-4">
           <div className="flex-1">
-             <label className="text-[10px] uppercase tracking-wider opacity-60">JPY (日圓)</label>
+             <label className="text-[10px] uppercase tracking-wider opacity-60 font-bold">JPY 日幣</label>
              <input 
                 type="number" 
                 value={jpyAmount}
@@ -31,13 +56,47 @@ export const InfoTab: React.FC<InfoTabProps> = ({ exchangeRate }) => {
           </div>
           <ArrowRightLeft className="text-white/40" />
           <div className="flex-1 text-right">
-             <label className="text-[10px] uppercase tracking-wider opacity-60">TWD (台幣)</label>
+             <label className="text-[10px] uppercase tracking-wider opacity-60 font-bold">TWD 台幣</label>
              <div className="text-3xl font-bold text-tokyo-red py-1">
                 {jpyAmount ? (Number(jpyAmount) * exchangeRate).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",") : '0'}
              </div>
           </div>
         </div>
-        <p className="text-[10px] text-gray-500 mt-3 italic text-center opacity-60">* 以當前即時匯率 1:{exchangeRate.toFixed(3)} 計算</p>
+        <p className="text-[10px] text-gray-500 mt-3 text-center opacity-60 italic">系統採用匯率: {exchangeRate.toFixed(3)}</p>
+      </div>
+
+      {/* Data Management - NEW FAILSAFE */}
+      <div className="bg-white rounded-3xl p-6 shadow-sm border border-orange-100">
+         <div className="flex items-center space-x-2 mb-4">
+            <Database className="text-orange-500" size={20} />
+            <h2 className="text-lg font-bold">系統資料管理</h2>
+         </div>
+         <p className="text-xs text-gray-500 mb-4 leading-relaxed">
+            若您擔心重新整理或換手機資料消失，請定期匯出備份。更新版本後若資料未出現，可使用匯入功能還原。
+         </p>
+         <div className="grid grid-cols-2 gap-3">
+            <button 
+              onClick={handleExport}
+              className="flex items-center justify-center space-x-2 bg-gray-50 text-gray-700 py-3 rounded-xl text-sm font-bold active:bg-gray-100"
+            >
+               <Download size={16} />
+               <span>匯出備份</span>
+            </button>
+            <button 
+              onClick={() => fileInputRef.current?.click()}
+              className="flex items-center justify-center space-x-2 bg-orange-50 text-orange-600 py-3 rounded-xl text-sm font-bold active:bg-orange-100"
+            >
+               <Upload size={16} />
+               <span>匯入還原</span>
+            </button>
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              className="hidden" 
+              accept=".json" 
+              onChange={handleFileChange}
+            />
+         </div>
       </div>
 
       {/* Flights */}
@@ -82,19 +141,9 @@ export const InfoTab: React.FC<InfoTabProps> = ({ exchangeRate }) => {
          </div>
       </div>
 
-      {/* Emergency */}
-      <div className="grid grid-cols-2 gap-4">
-          <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
-             <Train className="text-blue-500 mb-2" size={24} />
-             <h3 className="font-bold text-sm mb-1">交通小撇步</h3>
-             <p className="text-[10px] text-gray-400 leading-relaxed">下載乘換案內、準備好 Suica 或 iPhone 錢包綁定。</p>
-          </div>
-          <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
-             <Phone className="text-red-500 mb-2" size={24} />
-             <h3 className="font-bold text-sm mb-1">緊急聯絡</h3>
-             <p className="text-xs text-gray-500">警察: 110</p>
-             <p className="text-xs text-gray-500">救護: 119</p>
-          </div>
+      <div className="flex items-center justify-center space-x-2 text-[10px] text-gray-400">
+         <AlertCircle size={10} />
+         <span>所有資料僅儲存於您的手機瀏覽器中</span>
       </div>
     </div>
   );
