@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { DaySchedule, ItineraryItem, ItineraryType, TransportType, CATEGORY_LABELS } from '../types';
 import { getWeatherIcon } from '../constants';
-import { Plus, MapPin, Footprints, Car, Train, Clock, Trash2, GripVertical, Navigation, Ticket, ArrowRight, Accessibility, Sparkles, Loader2, ChevronUp, ChevronDown, RefreshCw } from 'lucide-react';
+import { Plus, MapPin, Footprints, Car, Train, Clock, Trash2, Navigation, Accessibility, Loader2, ChevronUp, ChevronDown, RefreshCw, AlertCircle } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 
 interface ItineraryTabProps {
@@ -35,11 +35,17 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<ItineraryItem | null>(null);
-  const [loadingTransportIds, setLoadingTransportIds] = useState<Set<string>>(new Set());
+  const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
 
   const currentDay = schedule[selectedDayIndex];
 
   const fetchTransportFromAI = async (from: string, to: string) => {
+    // Vercel deployment requires API_KEY set in Environment Variables
+    if (!process.env.API_KEY) {
+      console.error("Gemini API Key is missing. Please set it in Vercel/Local environment.");
+      return null;
+    }
+
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     try {
       const response = await ai.models.generateContent({
@@ -48,9 +54,7 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
                    STRICT RULES:
                    1. Use JAPANESE (Kanji/Kana) for all Station names and Line names.
                    2. Return JSON: type(TRAIN, WALK, CAR), durationMinutes(number), details(string).
-                   3. Details Format: "[LineCode LineName] Station -> Station | Exit/Transfer Info".
-                   Example: "[G 銀座線] 上野駅(G16) -> 銀座駅(G09) | A12出口".
-                   Example: "[JR 山手線] 渋谷駅 -> 新宿駅 | 南口".`,
+                   3. Details Format: "[LineCode LineName] Station -> Station | Exit/Transfer Info".`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -59,18 +63,19 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
               type: { type: Type.STRING, enum: ["TRAIN", "WALK", "CAR"] },
               durationMinutes: { type: Type.NUMBER },
               details: { type: Type.STRING }
-            }
+            },
+            required: ["type", "durationMinutes", "details"]
           }
         }
       });
       return JSON.parse(response.text || '{}');
     } catch (e) {
-      console.error("AI Transport Error", e);
+      console.error("AI Request Failed", e);
       return null;
     }
   };
 
-  const updateTransportForIndex = async (idx: number, dayIdx: number = selectedDayIndex) => {
+  const updateTransportForIndex = useCallback(async (idx: number, dayIdx: number = selectedDayIndex) => {
     const day = schedule[dayIdx];
     const items = day.items;
     if (idx < 0 || idx >= items.length - 1) return;
@@ -78,32 +83,36 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
     const fromItem = items[idx];
     const toItem = items[idx + 1];
     
-    setLoadingTransportIds(prev => new Set(prev).add(fromItem.id));
+    // Use unique ID to track loading state
+    setLoadingIds(prev => new Set(prev).add(fromItem.id));
     
-    const data = await fetchTransportFromAI(fromItem.name, toItem.name);
-    
-    if (data) {
-      setSchedule(prev => prev.map((d, dIdx) => {
-        if (dIdx !== dayIdx) return d;
-        return {
-          ...d,
-          items: d.items.map(it => it.id === fromItem.id ? {
-            ...it,
-            transportToNext: {
-              type: data.type || 'TRAIN',
-              durationMinutes: data.durationMinutes || 15,
-              details: data.details || '路線規劃完成'
-            }
-          } : it)
-        };
-      }));
+    try {
+      const data = await fetchTransportFromAI(fromItem.name, toItem.name);
+      if (data) {
+        setSchedule(prev => prev.map((d, dIdx) => {
+          if (dIdx !== dayIdx) return d;
+          return {
+            ...d,
+            items: d.items.map(it => it.id === fromItem.id ? {
+              ...it,
+              transportToNext: {
+                type: data.type || 'TRAIN',
+                durationMinutes: data.durationMinutes || 15,
+                details: data.details || '路線規劃完成'
+              }
+            } : it)
+          };
+        }));
+      }
+    } finally {
+      // CRITICAL: Always remove from loading set even if it fails
+      setLoadingIds(prev => {
+        const next = new Set(prev);
+        next.delete(fromItem.id);
+        return next;
+      });
     }
-    setLoadingTransportIds(prev => {
-      const next = new Set(prev);
-      next.delete(fromItem.id);
-      return next;
-    });
-  };
+  }, [schedule, selectedDayIndex, setSchedule]);
 
   const handleSaveItem = async (item: ItineraryItem) => {
     const isAdding = !editingItem;
@@ -120,62 +129,48 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
     setIsModalOpen(false);
     setEditingItem(null);
 
-    // Refresh affected transport segments after state update has settled
+    // Trigger update after state settles
     setTimeout(() => {
-        const items = schedule[selectedDayIndex].items;
-        const newIdx = items.findIndex(i => i.startTime >= item.startTime);
-        if (newIdx > 0) updateTransportForIndex(newIdx - 1);
-        updateTransportForIndex(newIdx);
-    }, 100);
+        const dayItems = schedule[selectedDayIndex].items;
+        const newIdx = dayItems.findIndex(i => i.startTime >= item.startTime);
+        if (newIdx >= 0) {
+            if (newIdx > 0) updateTransportForIndex(newIdx - 1);
+            updateTransportForIndex(newIdx);
+        }
+    }, 300);
   };
 
   const handleDeleteItem = (id: string) => {
     if (!window.confirm('確定要刪除此行程嗎？')) return;
-    
     const itemIndex = currentDay.items.findIndex(i => i.id === id);
-
+    
     setSchedule(prev => prev.map((day, idx) => {
       if (idx !== selectedDayIndex) return day;
-      const filtered = day.items.filter(i => i.id !== id);
-      return { ...day, items: filtered };
+      return { ...day, items: day.items.filter(i => i.id !== id) };
     }));
 
-    // If we deleted an item, the transport from the PREVIOUS item to the NEW next item needs update
     if (itemIndex > 0) {
-        setTimeout(() => updateTransportForIndex(itemIndex - 1), 100);
+        setTimeout(() => updateTransportForIndex(itemIndex - 1), 300);
     }
-
-    setIsModalOpen(false);
-    setEditingItem(null);
   };
 
   const moveItem = async (index: number, direction: 'up' | 'down') => {
     const target = direction === 'up' ? index - 1 : index + 1;
     if (target < 0 || target >= currentDay.items.length) return;
 
-    // Perform the swap
     const newItems = [...currentDay.items];
     [newItems[index], newItems[target]] = [newItems[target], newItems[index]];
 
-    // Optimistically clear transport of affected segments
-    const clearedItems = newItems.map((it, i) => {
-        if (i === index || i === target || i === index - 1 || i === target - 1) {
-            const { transportToNext, ...rest } = it;
-            return rest as ItineraryItem;
-        }
-        return it;
-    });
-
     setSchedule(prev => prev.map((day, idx) => {
       if (idx !== selectedDayIndex) return day;
-      return { ...day, items: clearedItems };
+      return { ...day, items: newItems };
     }));
 
-    // Trigger sequential AI updates
-    const indices = [index - 1, index, target - 1, target].filter(i => i >= 0 && i < clearedItems.length - 1);
-    for (const idxToUpd of [...new Set(indices)]) {
-        await updateTransportForIndex(idxToUpd);
-    }
+    // Trigger sequential updates for affected segments
+    setTimeout(() => {
+        const indices = [index - 1, index, target - 1, target].filter(i => i >= 0 && i < newItems.length - 1);
+        [...new Set(indices)].forEach(idxToUpd => updateTransportForIndex(idxToUpd));
+    }, 300);
   };
 
   const renderTransportDetails = (details: string) => {
@@ -219,11 +214,10 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
         <div className="absolute left-[29px] top-4 bottom-10 w-0.5 bg-gray-200 -z-10"></div>
         {currentDay.items.map((item, idx) => (
           <div key={item.id} className="relative group mb-0">
-            {/* Dynamic Transport Connector */}
             {idx > 0 && (
                <div className="py-2 pl-16 flex flex-col justify-center min-h-[60px]">
-                  {loadingTransportIds.has(currentDay.items[idx-1].id) ? (
-                      <div className="flex items-center space-x-2 text-[10px] text-gray-400 animate-pulse bg-white/50 py-2 px-3 rounded-xl border border-dashed border-gray-200">
+                  {loadingIds.has(currentDay.items[idx-1].id) ? (
+                      <div className="flex items-center space-x-2 text-[10px] text-gray-400 animate-pulse bg-white/50 py-3 px-4 rounded-xl border border-dashed border-gray-200">
                           <Loader2 size={12} className="animate-spin text-tokyo-red"/>
                           <span className="font-medium">AI 正在規劃日文路線...</span>
                       </div>
@@ -238,14 +232,15 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
                         </div>
                       </div>
                   ) : (
-                      <button onClick={() => updateTransportForIndex(idx - 1)} className="flex items-center space-x-2 text-[10px] text-tokyo-red font-bold bg-white p-2 rounded-lg border border-tokyo-red/20 hover:bg-tokyo-red/5 transition-colors">
-                          <RefreshCw size={12}/> <span>自動重新規劃路線</span>
+                      <button onClick={() => updateTransportForIndex(idx - 1)} className="flex items-center space-x-2 text-[10px] text-tokyo-red font-bold bg-white p-2 rounded-lg border border-tokyo-red/20 hover:bg-tokyo-red/5 transition-colors group">
+                          <RefreshCw size={12} className="group-hover:rotate-180 transition-transform duration-500" /> 
+                          <span>重新規劃此路段</span>
                       </button>
                   )}
                </div>
             )}
             
-            {idx === 0 && <div className="h-8 flex items-center pl-16 mb-2 text-[10px] text-gray-400 font-bold">● 飯店出發</div>}
+            {idx === 0 && <div className="h-8 flex items-center pl-16 mb-2 text-[10px] text-gray-400 font-bold">● 今日行程開始</div>}
 
             <div className="flex items-start">
                <div className="w-14 pt-1 flex flex-col items-center mr-2 z-10">
@@ -285,17 +280,17 @@ const ItemModal: React.FC<{ isOpen: boolean; onClose: () => void; onSave: (item:
     return (
         <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
             <div className="bg-white rounded-3xl w-full max-w-md p-6 shadow-2xl animate-fade-in-up max-h-[85vh] overflow-y-auto">
-                <div className="flex justify-between items-center mb-6"><h3 className="text-xl font-bold">{initialData ? '編輯行程' : '新增行程'}</h3><button onClick={() => onDelete(initialData!.id)} className="text-red-400 p-2"><Trash2 size={20} /></button></div>
+                <div className="flex justify-between items-center mb-6"><h3 className="text-xl font-bold">{initialData ? '編輯行程' : '新增行程'}</h3><button onClick={() => initialData && onDelete(initialData.id)} className="text-red-400 p-2"><Trash2 size={20} /></button></div>
                 <div className="space-y-4">
-                    <label className="text-xs text-gray-400 block mb-1">類型</label>
+                    <label className="text-xs text-gray-400 block mb-1 font-bold">類型</label>
                     <select className="w-full bg-gray-50 rounded-xl p-3 text-sm" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value as ItineraryType})}>{Object.entries(CATEGORY_LABELS).map(([k,v]) => <option key={k} value={k}>{v}</option>)}</select>
-                    <label className="text-xs text-gray-400 block mb-1">名稱</label>
+                    <label className="text-xs text-gray-400 block mb-1 font-bold">名稱</label>
                     <input className="w-full bg-gray-50 rounded-xl p-3 text-sm font-bold" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} placeholder="例如: 晴空塔" />
                     <div className="flex space-x-4">
-                        <div className="flex-1"><label className="text-xs text-gray-400 block mb-1">開始時間</label><input type="time" className="w-full bg-gray-50 rounded-xl p-3 text-sm" value={formData.startTime} onChange={e => setFormData({...formData, startTime: e.target.value})}/></div>
-                        <div className="flex-1"><label className="text-xs text-gray-400 block mb-1">門票 (¥)</label><input type="number" className="w-full bg-gray-50 rounded-xl p-3 text-sm" value={formData.ticketPrice || ''} onChange={e => setFormData({...formData, ticketPrice: Number(e.target.value)})} placeholder="0"/></div>
+                        <div className="flex-1"><label className="text-xs text-gray-400 block mb-1 font-bold">開始時間</label><input type="time" className="w-full bg-gray-50 rounded-xl p-3 text-sm" value={formData.startTime} onChange={e => setFormData({...formData, startTime: e.target.value})}/></div>
+                        <div className="flex-1"><label className="text-xs text-gray-400 block mb-1 font-bold">門票 (¥)</label><input type="number" className="w-full bg-gray-50 rounded-xl p-3 text-sm" value={formData.ticketPrice || ''} onChange={e => setFormData({...formData, ticketPrice: Number(e.target.value)})} placeholder="0"/></div>
                     </div>
-                    <label className="text-xs text-gray-400 block mb-1">備註</label>
+                    <label className="text-xs text-gray-400 block mb-1 font-bold">備註</label>
                     <textarea className="w-full bg-gray-50 rounded-xl p-3 text-sm h-20 resize-none" value={formData.notes || ''} onChange={e => setFormData({...formData, notes: e.target.value})} placeholder="特色、清單..." />
                 </div>
                 <div className="flex space-x-3 mt-8">
