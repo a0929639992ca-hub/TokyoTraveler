@@ -1,0 +1,8 @@
+{
+  "name": "TokyoTraveler",
+  "description": "A Japanese minimalist style travel itinerary app with offline capabilities, integrating itinerary management, expense tracking, and travel info.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
