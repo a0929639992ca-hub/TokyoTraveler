@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { FLIGHT_INFOS } from '../constants';
-import { Plane, Phone, Car, MapPin, Calculator, ArrowRightLeft, Train, Download, Upload, Database, AlertCircle } from 'lucide-react';
+import { Plane, Phone, Car, MapPin, Calculator, ArrowRightLeft, Train, Download, Upload, Database, AlertCircle, ShieldCheck } from 'lucide-react';
 
 interface InfoTabProps {
   exchangeRate: number;
@@ -15,11 +15,9 @@ export const InfoTab: React.FC<InfoTabProps> = ({ exchangeRate, onImport, allDat
   const handleExport = () => {
     const dataStr = JSON.stringify(allData, null, 2);
     const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-    const exportFileDefaultName = `tokyo_trip_backup_${new Date().toISOString().split('T')[0]}.json`;
-    
     const linkElement = document.createElement('a');
     linkElement.setAttribute('href', dataUri);
-    linkElement.setAttribute('download', exportFileDefaultName);
+    linkElement.setAttribute('download', `tokyo_backup_${new Date().toISOString().split('T')[0]}.json`);
     linkElement.click();
   };
 
@@ -27,21 +25,29 @@ export const InfoTab: React.FC<InfoTabProps> = ({ exchangeRate, onImport, allDat
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
-      const content = event.target?.result as string;
-      onImport(content);
-    };
+    reader.onload = (event) => onImport(event.target?.result as string);
     reader.readAsText(file);
   };
 
   return (
     <div className="px-6 pb-24 space-y-6 animate-fade-in">
       
+      {/* Auto-Save Assurance Card */}
+      <div className="bg-white rounded-3xl p-5 shadow-sm border border-green-50 flex items-center space-x-4">
+        <div className="w-12 h-12 bg-green-50 rounded-2xl flex items-center justify-center text-green-500 flex-shrink-0">
+          <ShieldCheck size={28} />
+        </div>
+        <div>
+          <h3 className="font-bold text-gray-800 text-sm">自動同步已啟用</h3>
+          <p className="text-[10px] text-gray-400 leading-tight">您的行程與花費會在每次更動後即時儲存於此瀏覽器中，無須手動存檔。</p>
+        </div>
+      </div>
+
       {/* Rate Converter */}
       <div className="bg-gradient-to-br from-gray-800 to-black text-white rounded-3xl p-6 shadow-xl">
         <div className="flex items-center space-x-2 mb-4 opacity-80">
           <Calculator size={18} />
-          <span className="text-sm font-medium">即時匯率換算 (1 JPY ≈ {exchangeRate.toFixed(3)} TWD)</span>
+          <span className="text-sm font-medium">匯率換算 (1 JPY ≈ {exchangeRate.toFixed(3)} TWD)</span>
         </div>
         <div className="flex items-center justify-between space-x-4">
           <div className="flex-1">
@@ -62,40 +68,22 @@ export const InfoTab: React.FC<InfoTabProps> = ({ exchangeRate, onImport, allDat
              </div>
           </div>
         </div>
-        <p className="text-[10px] text-gray-500 mt-3 text-center opacity-60 italic">系統採用匯率: {exchangeRate.toFixed(3)}</p>
       </div>
 
-      {/* Data Management - NEW FAILSAFE */}
-      <div className="bg-white rounded-3xl p-6 shadow-sm border border-orange-100">
+      {/* Data Management (As Failsafe) */}
+      <div className="bg-white rounded-3xl p-6 shadow-sm">
          <div className="flex items-center space-x-2 mb-4">
-            <Database className="text-orange-500" size={20} />
-            <h2 className="text-lg font-bold">系統資料管理</h2>
+            <Database className="text-gray-400" size={18} />
+            <h2 className="text-base font-bold text-gray-700">手動資料管理 (備援)</h2>
          </div>
-         <p className="text-xs text-gray-500 mb-4 leading-relaxed">
-            若您擔心重新整理或換手機資料消失，請定期匯出備份。更新版本後若資料未出現，可使用匯入功能還原。
-         </p>
          <div className="grid grid-cols-2 gap-3">
-            <button 
-              onClick={handleExport}
-              className="flex items-center justify-center space-x-2 bg-gray-50 text-gray-700 py-3 rounded-xl text-sm font-bold active:bg-gray-100"
-            >
-               <Download size={16} />
-               <span>匯出備份</span>
+            <button onClick={handleExport} className="flex items-center justify-center space-x-2 bg-gray-50 text-gray-600 py-2.5 rounded-xl text-xs font-bold active:bg-gray-100">
+               <Download size={14} /> <span>下載備份</span>
             </button>
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="flex items-center justify-center space-x-2 bg-orange-50 text-orange-600 py-3 rounded-xl text-sm font-bold active:bg-orange-100"
-            >
-               <Upload size={16} />
-               <span>匯入還原</span>
+            <button onClick={() => fileInputRef.current?.click()} className="flex items-center justify-center space-x-2 bg-gray-50 text-gray-600 py-2.5 rounded-xl text-xs font-bold active:bg-gray-100">
+               <Upload size={14} /> <span>匯入還原</span>
             </button>
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              className="hidden" 
-              accept=".json" 
-              onChange={handleFileChange}
-            />
+            <input type="file" ref={fileInputRef} className="hidden" accept=".json" onChange={handleFileChange} />
          </div>
       </div>
 
@@ -117,7 +105,7 @@ export const InfoTab: React.FC<InfoTabProps> = ({ exchangeRate, onImport, allDat
                   </div>
                   <span className="text-2xl font-bold">{flight.arrivalTime}</span>
                </div>
-               <div className="flex justify-between text-xs text-gray-500">
+               <div className="flex justify-between text-xs text-gray-500 font-medium">
                   <span>{flight.airportCode.split('->')[0].trim()}</span>
                   <span className="font-mono">{flight.flightNumber}</span>
                   <span>{flight.airportCode.split('->')[1].trim()}</span>
@@ -130,20 +118,19 @@ export const InfoTab: React.FC<InfoTabProps> = ({ exchangeRate, onImport, allDat
       {/* Hotel */}
       <div className="bg-white rounded-3xl p-6 shadow-sm">
          <h2 className="text-lg font-bold mb-4 flex items-center"><MapPin className="mr-2 text-tokyo-red" size={20}/> 住宿資訊</h2>
-         <div className="space-y-2">
+         <div className="space-y-1">
             <h3 className="font-bold text-gray-800">上野斯特拉飯店</h3>
-            <p className="text-xs text-gray-400">ホテルサンルード“ステラ上野</p>
-            <p className="text-sm text-gray-500">〒110-0005 東京都台東区上野７丁目１−１</p>
-            <p className="text-sm text-gray-500 font-mono">+81 3-5806-1200</p>
-            <a href="https://maps.google.com/?q=Hotel+Sunroute+Stella+Ueno" target="_blank" className="block w-full text-center py-2 mt-2 bg-gray-50 text-tokyo-red rounded-xl text-sm font-bold active:bg-gray-100">
-               導航至飯店
+            <p className="text-xs text-gray-500">〒110-0005 東京都台東区上野７丁目１−１</p>
+            <p className="text-xs text-gray-500 font-mono">+81 3-5806-1200</p>
+            <a href="https://maps.google.com/?q=Hotel+Sunroute+Stella+Ueno" target="_blank" className="block w-full text-center py-2.5 mt-3 bg-tokyo-red/5 text-tokyo-red rounded-xl text-sm font-bold active:bg-tokyo-red/10">
+               在 Google 地圖中開啟
             </a>
          </div>
       </div>
 
-      <div className="flex items-center justify-center space-x-2 text-[10px] text-gray-400">
+      <div className="flex items-center justify-center space-x-2 text-[10px] text-gray-400 pb-10">
          <AlertCircle size={10} />
-         <span>所有資料僅儲存於您的手機瀏覽器中</span>
+         <span>系統將優先讀取您瀏覽器中的自訂行程</span>
       </div>
     </div>
   );

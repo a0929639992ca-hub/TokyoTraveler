@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect } from 'react';
 import { Header } from './components/Header';
 import { ItineraryTab } from './components/ItineraryTab';
 import { InfoTab } from './components/InfoTab';
@@ -7,67 +7,79 @@ import { ExpensesTab } from './components/ExpensesTab';
 import { TabType, DaySchedule, ExpenseItem, ShoppingItem } from './types';
 import { INITIAL_SCHEDULE } from './constants';
 
+const STORAGE_KEY = 'TOKYO_TRAVELER_MASTER_DATA';
+const OLD_KEYS = ['tokyo_schedule_v2', 'tokyo_expenses_v2', 'tokyo_shopping_v2'];
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('ITINERARY');
-  const [isLoaded, setIsLoaded] = useState(false);
-
-  // 1. Schedule State with Robust Persistence
-  const [schedule, setSchedule] = useState<DaySchedule[]>(() => {
-    const saved = localStorage.getItem('tokyo_schedule_v2');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error("Failed to parse schedule", e);
-      }
-    }
-    return INITIAL_SCHEDULE;
-  });
-
-  // 2. Expenses State
-  const [expenses, setExpenses] = useState<ExpenseItem[]>(() => {
-    const saved = localStorage.getItem('tokyo_expenses_v2');
-    return saved ? JSON.parse(saved) : [];
-  });
-
-  // 3. Shopping State
-  const [shoppingList, setShoppingList] = useState<ShoppingItem[]>(() => {
-    const saved = localStorage.getItem('tokyo_shopping_v2');
-    return saved ? JSON.parse(saved) : [];
-  });
-
+  const [isReady, setIsReady] = useState(false);
+  
+  // Master State
+  const [schedule, setSchedule] = useState<DaySchedule[]>(INITIAL_SCHEDULE);
+  const [expenses, setExpenses] = useState<ExpenseItem[]>([]);
+  const [shoppingList, setShoppingList] = useState<ShoppingItem[]>([]);
   const [exchangeRate, setExchangeRate] = useState<number>(0.205);
 
-  // Mark as loaded to prevent INITIAL_SCHEDULE overwriting storage during first empty render
-  useEffect(() => {
-    setIsLoaded(true);
+  // 1. Data Hydration & Migration Logic
+  useLayoutEffect(() => {
+    const loadData = () => {
+      const savedMaster = localStorage.getItem(STORAGE_KEY);
+      
+      if (savedMaster) {
+        try {
+          const parsed = JSON.parse(savedMaster);
+          if (parsed.schedule) setSchedule(parsed.schedule);
+          if (parsed.expenses) setExpenses(parsed.expenses);
+          if (parsed.shopping) setShoppingList(parsed.shopping);
+          console.log("Auto-loaded from Master Storage");
+        } catch (e) {
+          console.error("Master storage corrupted", e);
+        }
+      } else {
+        // Try to migrate from old version keys if Master doesn't exist
+        const oldSchedule = localStorage.getItem('tokyo_schedule_v2');
+        const oldExpenses = localStorage.getItem('tokyo_expenses_v2');
+        const oldShopping = localStorage.getItem('tokyo_shopping_v2');
+
+        if (oldSchedule || oldExpenses || oldShopping) {
+          console.log("Migrating data from previous version...");
+          if (oldSchedule) setSchedule(JSON.parse(oldSchedule));
+          if (oldExpenses) setExpenses(JSON.parse(oldExpenses));
+          if (oldShopping) setShoppingList(JSON.parse(oldShopping));
+        }
+      }
+      setIsReady(true);
+    };
+
+    loadData();
   }, []);
 
-  // Effects: Sync to LocalStorage (Use versioned keys to avoid conflicts with old builds)
+  // 2. Automatic Persistence Effect
   useEffect(() => {
-    if (isLoaded) localStorage.setItem('tokyo_schedule_v2', JSON.stringify(schedule));
-  }, [schedule, isLoaded]);
+    if (isReady) {
+      const masterData = {
+        schedule,
+        expenses,
+        shopping: shoppingList,
+        lastSaved: new Date().toISOString()
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(masterData));
+      // Cleanup old keys to save space after migration
+      OLD_KEYS.forEach(key => localStorage.removeItem(key));
+    }
+  }, [schedule, expenses, shoppingList, isReady]);
 
-  useEffect(() => {
-    if (isLoaded) localStorage.setItem('tokyo_expenses_v2', JSON.stringify(expenses));
-  }, [expenses, isLoaded]);
-
-  useEffect(() => {
-    if (isLoaded) localStorage.setItem('tokyo_shopping_v2', JSON.stringify(shoppingList));
-  }, [shoppingList, isLoaded]);
-
-  // Fetch Exchange Rate (JPY -> TWD)
+  // 3. Fetch Exchange Rate
   useEffect(() => {
     const fetchRate = async () => {
       try {
         const res = await fetch('https://api.exchangerate-api.com/v4/latest/JPY');
         const data = await res.json();
-        if (data && data.rates && data.rates.TWD) {
-          // Force to 3 decimal precision
+        if (data?.rates?.TWD) {
           setExchangeRate(parseFloat(data.rates.TWD.toFixed(3)));
         }
       } catch (error) {
-        console.warn("Failed to fetch exchange rate, using 0.205 default.");
+        console.warn("Using default rate 0.205");
       }
     };
     fetchRate();
@@ -81,9 +93,11 @@ const App: React.FC = () => {
       if (data.shopping) setShoppingList(data.shopping);
       alert('資料匯入成功！');
     } catch (e) {
-      alert('匯入失敗，請檢查檔案格式。');
+      alert('匯入失敗');
     }
   };
+
+  if (!isReady) return null; // Prevent flicker
 
   const renderContent = () => {
     switch (activeTab) {
@@ -109,8 +123,15 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-tokyo-gray font-sans pb-10">
       <Header activeTab={activeTab} setActiveTab={setActiveTab} />
+      {/* Auto-save Indicator */}
+      <div className="max-w-md mx-auto px-6 -mt-4 mb-2 flex justify-end">
+        <div className="flex items-center space-x-1.5 px-2 py-0.5 bg-white/50 backdrop-blur-sm rounded-full border border-gray-100 shadow-sm">
+          <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
+          <span className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter">Local Auto-Save Active</span>
+        </div>
+      </div>
       <main className="max-w-md mx-auto relative z-0">
-        <div className="mt-6 animate-fade-in">
+        <div className="mt-2 animate-fade-in">
           {renderContent()}
         </div>
       </main>
