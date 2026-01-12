@@ -1,7 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { DaySchedule, ItineraryItem, ItineraryType, TransportType, CATEGORY_LABELS } from '../types';
-import { getWeatherIcon } from '../constants';
-import { Plus, MapPin, Footprints, Car, Train, Clock, Trash2, Navigation, Accessibility, Loader2, ChevronUp, ChevronDown, RefreshCw, AlertCircle } from 'lucide-react';
+import { Plus, MapPin, Footprints, Car, Train, Trash2, Navigation, Accessibility, Loader2, ChevronUp, ChevronDown, RefreshCw, AlertCircle } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 
 interface ItineraryTabProps {
@@ -36,13 +35,15 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<ItineraryItem | null>(null);
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
+  
+  // Track ongoing requests to prevent duplicates
+  const pendingRequests = useRef<Set<string>>(new Set());
 
   const currentDay = schedule[selectedDayIndex];
 
   const fetchTransportFromAI = async (from: string, to: string) => {
-    // Vercel deployment requires API_KEY set in Environment Variables
     if (!process.env.API_KEY) {
-      console.error("Gemini API Key is missing. Please set it in Vercel/Local environment.");
+      console.error("Gemini API Key missing");
       return null;
     }
 
@@ -68,22 +69,27 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
           }
         }
       });
-      return JSON.parse(response.text || '{}');
+      const text = response.text;
+      return text ? JSON.parse(text) : null;
     } catch (e) {
       console.error("AI Request Failed", e);
       return null;
     }
   };
 
-  const updateTransportForIndex = useCallback(async (idx: number, dayIdx: number = selectedDayIndex) => {
+  const updateTransportForIndex = useCallback(async (idx: number, dayIdx: number) => {
     const day = schedule[dayIdx];
     const items = day.items;
     if (idx < 0 || idx >= items.length - 1) return;
 
     const fromItem = items[idx];
     const toItem = items[idx + 1];
+    const requestId = `${fromItem.id}-${toItem.id}`;
+
+    // Avoid parallel requests for the same segment
+    if (pendingRequests.current.has(requestId)) return;
     
-    // Use unique ID to track loading state
+    pendingRequests.current.add(requestId);
     setLoadingIds(prev => new Set(prev).add(fromItem.id));
     
     try {
@@ -105,72 +111,88 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
         }));
       }
     } finally {
-      // CRITICAL: Always remove from loading set even if it fails
+      pendingRequests.current.delete(requestId);
       setLoadingIds(prev => {
         const next = new Set(prev);
         next.delete(fromItem.id);
         return next;
       });
     }
-  }, [schedule, selectedDayIndex, setSchedule]);
+  }, [schedule, setSchedule]);
 
-  const handleSaveItem = async (item: ItineraryItem) => {
+  // --- AUTO WATCHER EFFECT ---
+  // This automatically fills in missing transport data whenever schedule changes
+  useEffect(() => {
+    const dayItems = currentDay.items;
+    for (let i = 0; i < dayItems.length - 1; i++) {
+      const item = dayItems[i];
+      const nextItem = dayItems[i + 1];
+      
+      // If transport is missing AND we aren't already loading it
+      if (!item.transportToNext && !loadingIds.has(item.id)) {
+        // Debounce slightly to allow multiple changes to settle
+        const timer = setTimeout(() => {
+          updateTransportForIndex(i, selectedDayIndex);
+        }, 800);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [currentDay.items, selectedDayIndex, updateTransportForIndex, loadingIds]);
+
+  const handleSaveItem = (item: ItineraryItem) => {
     const isAdding = !editingItem;
-    
     setSchedule(prev => prev.map((day, idx) => {
       if (idx !== selectedDayIndex) return day;
       let newItems = [...day.items];
-      if (isAdding) newItems.push(item);
-      else newItems = newItems.map(i => i.id === item.id ? item : i);
+      if (isAdding) {
+        // If adding, clean transport of last item if needed
+        newItems.push(item);
+      } else {
+        newItems = newItems.map(i => i.id === item.id ? { ...item, transportToNext: undefined } : i);
+      }
+      // Re-sort items by time - if sequence changes, auto-watcher will handle transport
       newItems.sort((a, b) => a.startTime.localeCompare(b.startTime));
-      return { ...day, items: newItems };
+      
+      // Whenever items are reordered/added, we nullify transport of items to force re-calc
+      // only for those that moved or are new
+      return { ...day, items: newItems.map((it, i) => {
+        if (i < newItems.length - 1) {
+            // Logic to determine if we should reset transport:
+            // For simplicity, we let the user manually refresh or 
+            // the watcher will pick up if it's missing.
+            return it;
+        }
+        return { ...it, transportToNext: undefined };
+      }) };
     }));
-
     setIsModalOpen(false);
     setEditingItem(null);
-
-    // Trigger update after state settles
-    setTimeout(() => {
-        const dayItems = schedule[selectedDayIndex].items;
-        const newIdx = dayItems.findIndex(i => i.startTime >= item.startTime);
-        if (newIdx >= 0) {
-            if (newIdx > 0) updateTransportForIndex(newIdx - 1);
-            updateTransportForIndex(newIdx);
-        }
-    }, 300);
   };
 
   const handleDeleteItem = (id: string) => {
     if (!window.confirm('確定要刪除此行程嗎？')) return;
-    const itemIndex = currentDay.items.findIndex(i => i.id === id);
-    
     setSchedule(prev => prev.map((day, idx) => {
       if (idx !== selectedDayIndex) return day;
       return { ...day, items: day.items.filter(i => i.id !== id) };
     }));
-
-    if (itemIndex > 0) {
-        setTimeout(() => updateTransportForIndex(itemIndex - 1), 300);
-    }
   };
 
-  const moveItem = async (index: number, direction: 'up' | 'down') => {
+  const moveItem = (index: number, direction: 'up' | 'down') => {
     const target = direction === 'up' ? index - 1 : index + 1;
     if (target < 0 || target >= currentDay.items.length) return;
 
     const newItems = [...currentDay.items];
+    // Reset transport for affected items because sequence changed
+    newItems[index] = { ...newItems[index], transportToNext: undefined };
+    if (index > 0) newItems[index-1] = { ...newItems[index-1], transportToNext: undefined };
+    if (target > 0) newItems[target-1] = { ...newItems[target-1], transportToNext: undefined };
+    
     [newItems[index], newItems[target]] = [newItems[target], newItems[index]];
 
     setSchedule(prev => prev.map((day, idx) => {
       if (idx !== selectedDayIndex) return day;
       return { ...day, items: newItems };
     }));
-
-    // Trigger sequential updates for affected segments
-    setTimeout(() => {
-        const indices = [index - 1, index, target - 1, target].filter(i => i >= 0 && i < newItems.length - 1);
-        [...new Set(indices)].forEach(idxToUpd => updateTransportForIndex(idxToUpd));
-    }, 300);
   };
 
   const renderTransportDetails = (details: string) => {
@@ -232,15 +254,18 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
                         </div>
                       </div>
                   ) : (
-                      <button onClick={() => updateTransportForIndex(idx - 1)} className="flex items-center space-x-2 text-[10px] text-tokyo-red font-bold bg-white p-2 rounded-lg border border-tokyo-red/20 hover:bg-tokyo-red/5 transition-colors group">
-                          <RefreshCw size={12} className="group-hover:rotate-180 transition-transform duration-500" /> 
-                          <span>重新規劃此路段</span>
-                      </button>
+                      <div className="flex items-center space-x-2 text-[9px] text-gray-300 italic py-2">
+                        <div className="w-1 h-1 bg-gray-200 rounded-full animate-bounce"></div>
+                        <span>等待自動規劃中...</span>
+                        <button onClick={() => updateTransportForIndex(idx - 1, selectedDayIndex)} className="ml-2 text-tokyo-red font-bold not-italic hover:underline flex items-center">
+                            <RefreshCw size={10} className="mr-1"/> 手動重試
+                        </button>
+                      </div>
                   )}
                </div>
             )}
             
-            {idx === 0 && <div className="h-8 flex items-center pl-16 mb-2 text-[10px] text-gray-400 font-bold">● 今日行程開始</div>}
+            {idx === 0 && <div className="h-8 flex items-center pl-16 mb-2 text-[10px] text-gray-400 font-bold tracking-widest">START</div>}
 
             <div className="flex items-start">
                <div className="w-14 pt-1 flex flex-col items-center mr-2 z-10">
