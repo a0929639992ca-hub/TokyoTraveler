@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { DaySchedule, ItineraryItem, ItineraryType, TransportType, CATEGORY_LABELS } from '../types';
-import { Plus, MapPin, Footprints, Car, Train, Trash2, Navigation, Accessibility, Loader2, ChevronUp, ChevronDown, RefreshCw, AlertCircle, XCircle } from 'lucide-react';
+import { Plus, MapPin, Footprints, Car, Train, Trash2, Navigation, Accessibility, Loader2, ChevronUp, ChevronDown, RefreshCw, AlertCircle, XCircle, Key } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 
 interface ItineraryTabProps {
@@ -15,9 +15,10 @@ const LINE_COLORS: Record<string, string> = {
   'S': 'bg-[#B0CA71]', 'JR': 'bg-[#80C241]', 'KS': 'bg-[#00549F]',
 };
 
-// Helper to clean JSON string from AI response
+// Helper to clean JSON string from AI response even if wrapped in markdown
 const cleanJsonString = (str: string) => {
-  return str.replace(/```json/g, '').replace(/```/g, '').trim();
+  const jsonMatch = str.match(/\{[\s\S]*\}/);
+  return jsonMatch ? jsonMatch[0] : str.replace(/```json/g, '').replace(/```/g, '').trim();
 };
 
 const LineBadge: React.FC<{ raw: string }> = ({ raw }) => {
@@ -41,20 +42,45 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
   const [editingItem, setEditingItem] = useState<ItineraryItem | null>(null);
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
   const [errorIds, setErrorIds] = useState<Set<string>>(new Set());
+  const [needsKey, setNeedsKey] = useState(false);
   
   const pendingRequests = useRef<Set<string>>(new Set());
   const currentDay = schedule[selectedDayIndex];
 
+  const handleOpenKeyPicker = async () => {
+    try {
+      if (window.aistudio?.openSelectKey) {
+        await window.aistudio.openSelectKey();
+        setNeedsKey(false);
+        setErrorIds(new Set()); // Clear errors to retry
+      } else {
+        alert("無法開啟金鑰選擇器，請檢查瀏覽器環境。");
+      }
+    } catch (e) {
+      console.error("Failed to open key picker", e);
+    }
+  };
+
   const fetchTransportFromAI = async (from: string, to: string) => {
-    // Check if API key is available
     const apiKey = process.env.API_KEY;
+    
+    // Check if key is missing and if we are in an environment with aistudio helper
     if (!apiKey) {
-      console.error("Critical: API_KEY is missing from process.env. Check Vercel settings.");
-      return null;
+      if (window.aistudio) {
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        if (!hasKey) {
+          setNeedsKey(true);
+          return { error: 'KEY_NEEDED' };
+        }
+      } else {
+        console.error("API_KEY is missing and aistudio helper not found.");
+        return { error: 'NO_KEY' };
+      }
     }
 
     try {
-      const ai = new GoogleGenAI({ apiKey });
+      // Create fresh instance right before call as required by guidelines
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: `You are a Tokyo local transport expert. Provide the best route from "${from}" to "${to}".
@@ -81,8 +107,12 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
       
       const cleanedText = cleanJsonString(text);
       return JSON.parse(cleanedText);
-    } catch (e) {
+    } catch (e: any) {
       console.error("AI Request Failed:", e);
+      if (e.message?.includes("Requested entity was not found") || e.message?.includes("API key not valid")) {
+        setNeedsKey(true);
+        return { error: 'KEY_NEEDED' };
+      }
       return null;
     }
   };
@@ -108,6 +138,12 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
     
     try {
       const data = await fetchTransportFromAI(fromItem.name, toItem.name);
+      
+      if (data?.error === 'KEY_NEEDED' || data?.error === 'NO_KEY') {
+        setErrorIds(prev => new Set(prev).add(fromItem.id));
+        return;
+      }
+
       if (data && data.type) {
         setSchedule(prev => prev.map((d, dIdx) => {
           if (dIdx !== dayIdx) return d;
@@ -140,15 +176,12 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
 
   useEffect(() => {
     const dayItems = currentDay.items;
-    let anyRequestSent = false;
-    
     for (let i = 0; i < dayItems.length - 1; i++) {
       const item = dayItems[i];
       if (!item.transportToNext && !loadingIds.has(item.id) && !errorIds.has(item.id)) {
         const timer = setTimeout(() => {
           updateTransportForIndex(i, selectedDayIndex);
-        }, 1000 + (i * 200)); // Stagger requests to avoid rate limits
-        anyRequestSent = true;
+        }, 800 + (i * 300));
         return () => clearTimeout(timer);
       }
     }
@@ -159,16 +192,10 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
       if (idx !== selectedDayIndex) return day;
       let newItems = [...day.items];
       const isAdding = !editingItem;
-      
       if (isAdding) newItems.push(item);
       else newItems = newItems.map(i => i.id === item.id ? { ...item, transportToNext: undefined } : i);
-      
       newItems.sort((a, b) => a.startTime.localeCompare(b.startTime));
-      
-      return { ...day, items: newItems.map((it, i) => {
-          // If the item sequence changed, we reset it
-          return it;
-      })};
+      return { ...day, items: newItems };
     }));
     setIsModalOpen(false);
     setEditingItem(null);
@@ -185,19 +212,16 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
   const moveItem = (index: number, direction: 'up' | 'down') => {
     const target = direction === 'up' ? index - 1 : index + 1;
     if (target < 0 || target >= currentDay.items.length) return;
-
     const newItems = [...currentDay.items];
     newItems[index] = { ...newItems[index], transportToNext: undefined };
     if (index > 0) newItems[index-1] = { ...newItems[index-1], transportToNext: undefined };
     if (target > 0) newItems[target-1] = { ...newItems[target-1], transportToNext: undefined };
-    
     [newItems[index], newItems[target]] = [newItems[target], newItems[index]];
-
     setSchedule(prev => prev.map((day, idx) => {
       if (idx !== selectedDayIndex) return day;
       return { ...day, items: newItems };
     }));
-    setErrorIds(new Set()); // Clear errors to allow re-calc
+    setErrorIds(new Set());
   };
 
   const renderTransportDetails = (details: string) => {
@@ -238,6 +262,19 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
       </div>
 
       <div className="px-6 space-y-0 relative mt-4">
+        {needsKey && (
+          <div className="mb-4 bg-orange-50 border border-orange-200 rounded-2xl p-4 flex items-center justify-between shadow-sm animate-fade-in">
+             <div className="flex items-center space-x-3">
+               <div className="p-2 bg-orange-100 text-orange-600 rounded-full"><Key size={20}/></div>
+               <div>
+                 <p className="text-xs font-bold text-orange-800">需要配置 API 金鑰</p>
+                 <p className="text-[10px] text-orange-600">偵測不到有效金鑰，請點擊右側按鈕進行設定。</p>
+               </div>
+             </div>
+             <button onClick={handleOpenKeyPicker} className="bg-orange-600 text-white px-4 py-2 rounded-xl text-xs font-bold active:scale-95 transition-transform shadow-md">設定金鑰</button>
+          </div>
+        )}
+
         <div className="absolute left-[29px] top-4 bottom-10 w-0.5 bg-gray-200 -z-10"></div>
         {currentDay.items.map((item, idx) => (
           <div key={item.id} className="relative group mb-0">
@@ -251,8 +288,9 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
                   ) : errorIds.has(currentDay.items[idx-1].id) ? (
                       <div className="flex items-center space-x-2 text-[10px] text-red-400 bg-red-50 py-2 px-4 rounded-xl border border-red-100">
                           <XCircle size={12} />
-                          <span className="font-medium">規劃失敗</span>
+                          <span className="font-medium">規劃失敗 {needsKey ? '(金鑰問題)' : ''}</span>
                           <button onClick={() => updateTransportForIndex(idx - 1, selectedDayIndex)} className="ml-2 font-bold underline active:scale-95 transition-transform">重試</button>
+                          {needsKey && <button onClick={handleOpenKeyPicker} className="ml-2 font-bold underline text-orange-600">設定</button>}
                       </div>
                   ) : currentDay.items[idx - 1].transportToNext ? (
                       <div className="flex flex-col items-start gap-1 animate-fade-in">
@@ -273,7 +311,7 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
                </div>
             )}
             
-            {idx === 0 && <div className="h-8 flex items-center pl-16 mb-2 text-[10px] text-gray-400 font-bold tracking-widest">START</div>}
+            {idx === 0 && <div className="h-8 flex items-center pl-16 mb-2 text-[10px] text-gray-400 font-bold tracking-widest uppercase">Start</div>}
 
             <div className="flex items-start">
                <div className="w-14 pt-1 flex flex-col items-center mr-2 z-10">
