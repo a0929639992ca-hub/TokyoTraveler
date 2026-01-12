@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { DaySchedule, ItineraryItem, ItineraryType, TransportType, CATEGORY_LABELS } from '../types';
-import { Plus, MapPin, Footprints, Car, Train, Trash2, Navigation, Accessibility, Loader2, ChevronUp, ChevronDown, RefreshCw, AlertCircle } from 'lucide-react';
+import { Plus, MapPin, Footprints, Car, Train, Trash2, Navigation, Accessibility, Loader2, ChevronUp, ChevronDown, RefreshCw, AlertCircle, XCircle } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 
 interface ItineraryTabProps {
@@ -13,6 +13,11 @@ const LINE_COLORS: Record<string, string> = {
   'C': 'bg-[#009944]', 'Y': 'bg-[#D7C447]', 'Z': 'bg-[#8BB2D0]', 'N': 'bg-[#00AC9B]',
   'F': 'bg-[#9C5E31]', 'E': 'bg-[#B6007A]', 'A': 'bg-[#E85298]', 'I': 'bg-[#009BBF]',
   'S': 'bg-[#B0CA71]', 'JR': 'bg-[#80C241]', 'KS': 'bg-[#00549F]',
+};
+
+// Helper to clean JSON string from AI response
+const cleanJsonString = (str: string) => {
+  return str.replace(/```json/g, '').replace(/```/g, '').trim();
 };
 
 const LineBadge: React.FC<{ raw: string }> = ({ raw }) => {
@@ -35,26 +40,27 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<ItineraryItem | null>(null);
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
+  const [errorIds, setErrorIds] = useState<Set<string>>(new Set());
   
-  // Track ongoing requests to prevent duplicates
   const pendingRequests = useRef<Set<string>>(new Set());
-
   const currentDay = schedule[selectedDayIndex];
 
   const fetchTransportFromAI = async (from: string, to: string) => {
-    if (!process.env.API_KEY) {
-      console.error("Gemini API Key missing");
+    // Check if API key is available
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) {
+      console.error("Critical: API_KEY is missing from process.env. Check Vercel settings.");
       return null;
     }
 
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     try {
+      const ai = new GoogleGenAI({ apiKey });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: `You are a Tokyo local transport expert. Provide the best route from "${from}" to "${to}".
                    STRICT RULES:
                    1. Use JAPANESE (Kanji/Kana) for all Station names and Line names.
-                   2. Return JSON: type(TRAIN, WALK, CAR), durationMinutes(number), details(string).
+                   2. Return JSON ONLY: type(TRAIN, WALK, CAR), durationMinutes(number), details(string).
                    3. Details Format: "[LineCode LineName] Station -> Station | Exit/Transfer Info".`,
         config: {
           responseMimeType: "application/json",
@@ -69,10 +75,14 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
           }
         }
       });
+
       const text = response.text;
-      return text ? JSON.parse(text) : null;
+      if (!text) return null;
+      
+      const cleanedText = cleanJsonString(text);
+      return JSON.parse(cleanedText);
     } catch (e) {
-      console.error("AI Request Failed", e);
+      console.error("AI Request Failed:", e);
       return null;
     }
   };
@@ -86,15 +96,19 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
     const toItem = items[idx + 1];
     const requestId = `${fromItem.id}-${toItem.id}`;
 
-    // Avoid parallel requests for the same segment
     if (pendingRequests.current.has(requestId)) return;
     
     pendingRequests.current.add(requestId);
     setLoadingIds(prev => new Set(prev).add(fromItem.id));
+    setErrorIds(prev => {
+        const next = new Set(prev);
+        next.delete(fromItem.id);
+        return next;
+    });
     
     try {
       const data = await fetchTransportFromAI(fromItem.name, toItem.name);
-      if (data) {
+      if (data && data.type) {
         setSchedule(prev => prev.map((d, dIdx) => {
           if (dIdx !== dayIdx) return d;
           return {
@@ -102,14 +116,18 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
             items: d.items.map(it => it.id === fromItem.id ? {
               ...it,
               transportToNext: {
-                type: data.type || 'TRAIN',
+                type: data.type,
                 durationMinutes: data.durationMinutes || 15,
                 details: data.details || '路線規劃完成'
               }
             } : it)
           };
         }));
+      } else {
+        setErrorIds(prev => new Set(prev).add(fromItem.id));
       }
+    } catch (e) {
+      setErrorIds(prev => new Set(prev).add(fromItem.id));
     } finally {
       pendingRequests.current.delete(requestId);
       setLoadingIds(prev => {
@@ -120,50 +138,37 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
     }
   }, [schedule, setSchedule]);
 
-  // --- AUTO WATCHER EFFECT ---
-  // This automatically fills in missing transport data whenever schedule changes
   useEffect(() => {
     const dayItems = currentDay.items;
+    let anyRequestSent = false;
+    
     for (let i = 0; i < dayItems.length - 1; i++) {
       const item = dayItems[i];
-      const nextItem = dayItems[i + 1];
-      
-      // If transport is missing AND we aren't already loading it
-      if (!item.transportToNext && !loadingIds.has(item.id)) {
-        // Debounce slightly to allow multiple changes to settle
+      if (!item.transportToNext && !loadingIds.has(item.id) && !errorIds.has(item.id)) {
         const timer = setTimeout(() => {
           updateTransportForIndex(i, selectedDayIndex);
-        }, 800);
+        }, 1000 + (i * 200)); // Stagger requests to avoid rate limits
+        anyRequestSent = true;
         return () => clearTimeout(timer);
       }
     }
-  }, [currentDay.items, selectedDayIndex, updateTransportForIndex, loadingIds]);
+  }, [currentDay.items, selectedDayIndex, updateTransportForIndex, loadingIds, errorIds]);
 
   const handleSaveItem = (item: ItineraryItem) => {
-    const isAdding = !editingItem;
     setSchedule(prev => prev.map((day, idx) => {
       if (idx !== selectedDayIndex) return day;
       let newItems = [...day.items];
-      if (isAdding) {
-        // If adding, clean transport of last item if needed
-        newItems.push(item);
-      } else {
-        newItems = newItems.map(i => i.id === item.id ? { ...item, transportToNext: undefined } : i);
-      }
-      // Re-sort items by time - if sequence changes, auto-watcher will handle transport
+      const isAdding = !editingItem;
+      
+      if (isAdding) newItems.push(item);
+      else newItems = newItems.map(i => i.id === item.id ? { ...item, transportToNext: undefined } : i);
+      
       newItems.sort((a, b) => a.startTime.localeCompare(b.startTime));
       
-      // Whenever items are reordered/added, we nullify transport of items to force re-calc
-      // only for those that moved or are new
       return { ...day, items: newItems.map((it, i) => {
-        if (i < newItems.length - 1) {
-            // Logic to determine if we should reset transport:
-            // For simplicity, we let the user manually refresh or 
-            // the watcher will pick up if it's missing.
-            return it;
-        }
-        return { ...it, transportToNext: undefined };
-      }) };
+          // If the item sequence changed, we reset it
+          return it;
+      })};
     }));
     setIsModalOpen(false);
     setEditingItem(null);
@@ -182,7 +187,6 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
     if (target < 0 || target >= currentDay.items.length) return;
 
     const newItems = [...currentDay.items];
-    // Reset transport for affected items because sequence changed
     newItems[index] = { ...newItems[index], transportToNext: undefined };
     if (index > 0) newItems[index-1] = { ...newItems[index-1], transportToNext: undefined };
     if (target > 0) newItems[target-1] = { ...newItems[target-1], transportToNext: undefined };
@@ -193,6 +197,7 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
       if (idx !== selectedDayIndex) return day;
       return { ...day, items: newItems };
     }));
+    setErrorIds(new Set()); // Clear errors to allow re-calc
   };
 
   const renderTransportDetails = (details: string) => {
@@ -243,8 +248,14 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
                           <Loader2 size={12} className="animate-spin text-tokyo-red"/>
                           <span className="font-medium">AI 正在規劃日文路線...</span>
                       </div>
+                  ) : errorIds.has(currentDay.items[idx-1].id) ? (
+                      <div className="flex items-center space-x-2 text-[10px] text-red-400 bg-red-50 py-2 px-4 rounded-xl border border-red-100">
+                          <XCircle size={12} />
+                          <span className="font-medium">規劃失敗</span>
+                          <button onClick={() => updateTransportForIndex(idx - 1, selectedDayIndex)} className="ml-2 font-bold underline active:scale-95 transition-transform">重試</button>
+                      </div>
                   ) : currentDay.items[idx - 1].transportToNext ? (
-                      <div className="flex flex-col items-start gap-1">
+                      <div className="flex flex-col items-start gap-1 animate-fade-in">
                         <div className="flex items-center space-x-1 bg-gray-100 px-2 py-0.5 rounded-full text-[10px] text-gray-600 font-bold mb-1">
                             {currentDay.items[idx - 1].transportToNext?.type === 'WALK' ? <Footprints size={12}/> : <Train size={12}/>}
                             <span>{currentDay.items[idx - 1].transportToNext!.durationMinutes} 分鐘</span>
@@ -255,11 +266,8 @@ export const ItineraryTab: React.FC<ItineraryTabProps> = ({ schedule, setSchedul
                       </div>
                   ) : (
                       <div className="flex items-center space-x-2 text-[9px] text-gray-300 italic py-2">
-                        <div className="w-1 h-1 bg-gray-200 rounded-full animate-bounce"></div>
+                        <div className="w-1.5 h-1.5 bg-gray-200 rounded-full animate-bounce"></div>
                         <span>等待自動規劃中...</span>
-                        <button onClick={() => updateTransportForIndex(idx - 1, selectedDayIndex)} className="ml-2 text-tokyo-red font-bold not-italic hover:underline flex items-center">
-                            <RefreshCw size={10} className="mr-1"/> 手動重試
-                        </button>
                       </div>
                   )}
                </div>
